@@ -1,0 +1,29 @@
+# Configuration statique Traefik — reverse proxy du segment IAM/DMZ
+# TEMPLATE : adapte les noms d'hôte et le resolver TLS à ton environnement.
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+api:
+  dashboard: true
+  insecure: false
+
+log:
+  level: INFO
+
+accessLog: {}

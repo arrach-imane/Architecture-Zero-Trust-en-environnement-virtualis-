@@ -1,0 +1,31 @@
+# Secrets et credentials
+.env
+.env.*
+*.key
+*.pem
+*secret*
+*password*
+
+# Exports bruts pouvant contenir des données sensibles
+configs/keycloak/realm-export*.json.bak
+*.sql
+*.pcap
+
+# Fichiers temporaires LaTeX
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.bbl
+*.blg
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Divers
+*.swp
+__pycache__/

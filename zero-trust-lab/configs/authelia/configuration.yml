@@ -1,0 +1,45 @@
+# Configuration Authelia — MFA devant les applications du lab
+# TEMPLATE : les secrets réels sont injectés via variables d'environnement
+# (voir docker-compose/.env.example). Ne jamais écrire de secret en clair ici.
+
+theme: light
+
+default_redirection_url: https://auth.lab.local
+
+server:
+  address: "tcp://:9091"
+
+log:
+  level: info
+
+totp:
+  issuer: zero-trust-lab
+
+authentication_backend:
+  file:
+    path: /config/users_database.yml
+
+access_control:
+  default_policy: deny
+  rules:
+    - domain: "nextcloud.lab.local"
+      policy: two_factor
+
+session:
+  name: authelia_session
+  expiration: 1h
+  inactivity: 5m
+  domain: lab.local
+
+regulation:
+  max_retries: 3
+  find_time: 2m
+  ban_time: 5m
+
+storage:
+  local:
+    path: /config/db.sqlite3
+
+notifier:
+  filesystem:
+    filename: /config/notification.txt

@@ -1,0 +1,445 @@
+% ============================================================
+% Phase A - Réseau plat : préparation et attaques de référence
+% Steps 1 à 4 du projet "Zero Trust Lab"
+% À intégrer dans le modèle rapportENSIAS
+% ============================================================
+
+\chapter{Phase A --- Réseau plat : mise en place et attaques de référence}
+
+\section{Introduction et objectifs}
+
+Cette phase a pour objectif de construire une architecture volontairement
+non sécurisée, représentative d'un déploiement rapide sans considération
+particulière pour la sécurité réseau. Toutes les machines partagent le
+même segment \texttt{192.168.1.0/24}, sans aucune règle de filtrage entre
+elles. Cette configuration sert de \emph{baseline} : les vulnérabilités
+qui y sont démontrées seront corrigées une à une lors de la Phase B
+(architecture Zero Trust), permettant une comparaison avant/après
+mesurable.
+
+\section{Architecture réseau de la Phase A}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Machine} & \textbf{Adresse IP} & \textbf{Rôle} \\
+\hline
+OPNsense & 192.168.1.1 & Routeur / pare-feu (sans filtrage actif) \\
+Server-DB & 192.168.1.20 & Serveur de base de données MariaDB \\
+Server-Nextcloud & 192.168.1.30 & Serveur applicatif Nextcloud (Apache/PHP) \\
+Kali-Attacker & 192.168.1.x (DHCP) & Poste d'attaque \\
+\hline
+\end{tabular}
+\caption{Adressage réseau de la Phase A (réseau plat)}
+\label{tab:adressage-phase-a}
+\end{table}
+
+Toutes les machines sont reliées au même réseau interne VirtualBox
+(\texttt{intnet-lan}), qui simule un commutateur (switch) Ethernet.
+Aucune segmentation ni règle de pare-feu n'est appliquée à ce stade.
+
+\section{Mise en place de Server-DB}
+
+\subsection{Configuration réseau statique}
+
+L'installateur Debian n'ayant configuré que l'interface utilisée pendant
+l'installation (temporairement en NAT), l'interface réseau interne
+\texttt{enp0s3} a dû être configurée manuellement en adresse statique :
+
+\begin{lstlisting}[language=bash, caption={Configuration statique de l'interface réseau}]
+auto enp0s3
+iface enp0s3 inet static
+    address 192.168.1.20/24
+    gateway 192.168.1.1
+    dns-nameservers 192.168.1.1
+\end{lstlisting}
+
+Après application (\texttt{systemctl restart networking}), la connectivité
+a été validée par trois tests de ping (passerelle, DNS public, nom de
+domaine), tous réussis avec 0\,\% de perte de paquets.
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.8\textwidth]{images/server-db-ip-pings.png}
+\caption{Validation de la configuration réseau de Server-DB : adresse IP et tests de connectivité}
+\label{fig:server-db-network}
+\end{figure}
+
+\textbf{Point de dépannage noté} : lors de la première tentative de
+configuration, un adaptateur NAT temporaire laissé actif par
+l'installateur permettait à la machine de contourner le pare-feu OPNsense
+pour accéder à internet. Ce comportement a été identifié et corrigé en
+désactivant l'adaptateur NAT, forçant toute la sortie réseau à transiter
+par OPNsense.
+
+\subsection{Installation et sécurisation de MariaDB}
+
+MariaDB (version 11.8.6) a été installé puis sécurisé à l'aide du script
+\texttt{mariadb-secure-installation} :
+
+\begin{itemize}
+    \item suppression des utilisateurs anonymes ;
+    \item interdiction de la connexion root à distance ;
+    \item suppression de la base de données \texttt{test} ;
+    \item rechargement des tables de privilèges.
+\end{itemize}
+
+\subsection{Exposition volontaire de la base de données}
+
+Afin de reproduire une erreur de configuration courante (base de données
+accessible depuis tout le réseau plutôt que restreinte au serveur
+applicatif), deux modifications ont été appliquées :
+
+\begin{lstlisting}[language=SQL, caption={Création de la base et de l'utilisateur Nextcloud}]
+CREATE DATABASE nextcloud CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+CREATE USER 'nextcloud'@'192.168.1.%' IDENTIFIED BY 'DB_PASSWORD_REDACTED';
+GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextcloud'@'192.168.1.%';
+FLUSH PRIVILEGES;
+\end{lstlisting}
+
+\begin{lstlisting}[language=bash, caption={Ouverture de MariaDB sur le réseau}]
+# /etc/mysql/mariadb.conf.d/50-server.cnf
+bind-address = 0.0.0.0
+\end{lstlisting}
+
+La vérification \texttt{ss -tlnp | grep 3306} confirme que le service
+écoute sur \texttt{0.0.0.0:3306}, c'est-à-dire sur toutes les interfaces
+réseau, et non uniquement en local. Cette exposition volontaire sera
+exploitée au \S\,\ref{sec:attaque-db} et corrigée en Phase B par une
+règle de pare-feu restreignant l'accès au seul serveur applicatif.
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.8\textwidth]{images/server-db-bind-address.png}
+\caption{MariaDB en écoute sur toutes les interfaces réseau (port 3306)}
+\label{fig:mariadb-expose}
+\end{figure}
+
+\section{Mise en place de Server-Nextcloud}
+
+\subsection{Configuration de la machine}
+
+Une VM Debian 13 (2\,Go de RAM, 20\,Go de disque) a été créée avec un
+unique adaptateur réseau en mode \emph{Internal Network}
+(\texttt{intnet-lan}), sans adaptateur NAT, afin que l'installation des
+paquets transite exclusivement par OPNsense. L'adresse statique
+\texttt{192.168.1.30/24} a été appliquée selon la même méthode que pour
+Server-DB.
+
+\subsection{Pile applicative}
+
+Apache 2.4.68 et PHP 8.4.26 ont été installés avec les extensions
+requises par Nextcloud (\texttt{mysql}, \texttt{gd}, \texttt{curl},
+\texttt{mbstring}, \texttt{xml}, etc.). La connectivité vers Server-DB a
+été validée avant l'installation de Nextcloud :
+
+\begin{lstlisting}[language=bash, caption={Test de connexion à la base de données distante}]
+mariadb -h 192.168.1.20 -u nextcloud -p
+\end{lstlisting}
+
+La connexion réussie confirme qu'aucune restriction réseau n'empêche
+Server-Nextcloud (ni, potentiellement, toute autre machine du segment)
+d'atteindre la base de données.
+
+\subsection{Installation de Nextcloud}
+
+Nextcloud (dernière version stable) a été téléchargé, extrait dans
+\texttt{/var/www/nextcloud}, puis installé en ligne de commande via
+\texttt{occ}, sans interface web :
+
+\begin{lstlisting}[language=bash, caption={Installation de Nextcloud via occ}]
+sudo -u www-data php /var/www/nextcloud/occ maintenance:install \
+    --database mysql \
+    --database-name nextcloud \
+    --database-user nextcloud \
+    --database-pass DB_PASSWORD_REDACTED \
+    --database-host 192.168.1.20 \
+    --admin-user admin \
+    --admin-pass ADMIN_PASSWORD_REDACTED
+\end{lstlisting}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.8\textwidth]{images/nextcloud-dashboard.png}
+\caption{Tableau de bord Nextcloud après installation réussie}
+\label{fig:nextcloud-dashboard}
+\end{figure}
+
+\subsection{Comptes utilisateurs de test}
+
+Afin de disposer de cibles réalistes pour les tests de brute force
+(\S\,\ref{sec:bruteforce}), plusieurs comptes ont été créés avec des
+mots de passe représentatifs de pratiques faibles courantes en
+entreprise (nom dérivé, réutilisation de mots courants) :
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Utilisateur} & \textbf{Mot de passe} & \textbf{Pattern illustré} \\
+\hline
+admin & ADMIN_PASSWORD_REDACTED & Compte administrateur \\
+admin2 & Qdmin123456789 & Faux compte admin secondaire oublié \\
+jdupont & Jdupont123 & Mot de passe dérivé du nom \\
+m.martin & ;qrtin;123456 & Mot de passe quasi-générique \\
+y.alaoui & Alaoui12345678 & Mot de passe dérivé du nom \\
+\hline
+\end{tabular}
+\caption{Comptes Nextcloud créés pour les tests d'intrusion}
+\label{tab:comptes-nextcloud}
+\end{table}
+
+\textbf{Observation} : Nextcloud a automatiquement rejeté plusieurs mots
+de passe initialement proposés (\texttt{Password1},
+\texttt{Alaoui1234}) car présents dans une liste de mots de passe
+compromis (vérification de type \emph{Have I Been Pwned}). Ce contrôle
+natif constitue une première ligne de défense présente dès la Phase A,
+à mentionner comme bonne pratique déjà en place.
+
+\section{Step 4 --- Attaques de référence (baseline)}
+
+Toutes les attaques suivantes ont été menées depuis une machine Kali
+Linux dédiée (\texttt{Kali-Attacker}), clonée d'une image existante puis
+reconfigurée sur le réseau \texttt{intnet-lan} uniquement, avec
+régénération de son adresse MAC pour éviter tout conflit.
+
+\subsection{Reconnaissance réseau (scan Nmap)}
+\label{sec:nmap}
+
+Un scan complet de tous les ports TCP, avec détection de version des
+services, a été lancé sur l'ensemble du sous-réseau :
+
+\begin{lstlisting}[language=bash, caption={Scan de reconnaissance Nmap}]
+nmap -sV -p- 192.168.1.0/24
+\end{lstlisting}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Hôte} & \textbf{Ports ouverts} & \textbf{Services identifiés} \\
+\hline
+192.168.1.1 & 53, 80, 443, 53053 & OPNsense (Unbound DNS, interface web) \\
+192.168.1.20 & 22, 3306 & OpenSSH 10.0, MariaDB (non filtrée) \\
+192.168.1.30 & 22, 80 & OpenSSH 10.0, Apache 2.4.68 (HTTP) \\
+\hline
+\end{tabular}
+\caption{Résultats du scan de reconnaissance}
+\label{tab:nmap-resultats}
+\end{table}
+
+\textbf{Analyse} : le scan révèle, sans aucune authentification préalable,
+l'intégralité des services exposés sur le réseau, y compris le port
+\textbf{3306 (MySQL/MariaDB)} directement accessible depuis le poste
+attaquant. Dans une architecture correctement segmentée, ce port ne
+devrait être visible que depuis le serveur applicatif autorisé.
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.9\textwidth]{images/nmap-scan-resultats.png}
+\caption{Résultats du scan Nmap révélant l'ensemble des services exposés}
+\label{fig:nmap-scan}
+\end{figure}
+
+\subsection{Chaîne d'attaque complète : de la reconnaissance à l'accès aux données}
+\label{sec:attaque-db}
+
+Plutôt que de supposer un accès direct et immédiat à la base de données
+(ce qui supposerait que l'attaquant connaisse déjà les identifiants),
+une chaîne d'attaque réaliste et complète a été reconstituée, respectant
+la logique d'un attaquant ne disposant initialement d'aucune information
+privilégiée.
+
+\subsubsection{Étape 1 --- Collecte d'information (OSINT) et génération de dictionnaire ciblé}
+
+En supposant que l'attaquant a pu identifier le nom de l'administratrice
+du système (scénario réaliste : fuite d'information, réseau social,
+métadonnées de document), un dictionnaire de mots de passe ciblé a été
+généré avec l'outil \textbf{CUPP} (\emph{Common User Passwords
+Profiler}), qui automatise la création de variantes probables à partir
+d'informations personnelles (nom, prénom, suffixes numériques
+courants) :
+
+\begin{lstlisting}[language=bash, caption={Génération d'un dictionnaire ciblé avec CUPP}]
+cupp -i
+# Saisie interactive : prenom, nom, mots-cles
+# Resultat : 11 940 variantes generees
+\end{lstlisting}
+
+\subsubsection{Étape 2 --- Attaque par force brute ciblée (SSH)}
+\label{sec:bruteforce}
+
+Un premier essai avec la liste complète (11\,940 mots) s'est révélé
+impraticable en raison du mécanisme de limitation de connexions
+simultanées de Debian (environ 22 à 24 heures estimées au rythme
+observé). La liste a donc été réduite aux variantes les plus probables
+(préfixes \texttt{imane} et \texttt{arrach}), ramenant le test à
+quelques dizaines de mots :
+
+\begin{lstlisting}[language=bash, caption={Attaque par force brute avec Hydra}]
+hydra -l nextcloud-user -P imane_fast.txt -t 1 -W 2 ssh://192.168.1.30
+\end{lstlisting}
+
+\textbf{Résultat} : le mot de passe \texttt{imanearrach} a été trouvé en
+10 tentatives, en moins de 2 minutes.
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.9\textwidth]{images/hydra-ssh-success.png}
+\caption{Succès de l'attaque par force brute ciblée contre le service SSH}
+\label{fig:hydra-success}
+\end{figure}
+
+\subsubsection{Étape 3 --- Extraction des identifiants de base de données}
+
+Une fois l'accès SSH obtenu, le fichier de configuration de Nextcloud a
+été consulté. Comme pour la grande majorité des applications web, les
+identifiants de connexion à la base de données y sont stockés en clair :
+
+\begin{lstlisting}[language=bash, caption={Lecture du fichier de configuration}]
+sudo cat /var/www/nextcloud/config/config.php
+\end{lstlisting}
+
+\begin{lstlisting}[language=PHP, caption={Extrait révélant le mot de passe en clair}]
+'dbhost' => '192.168.1.20',
+'dbuser' => 'nextcloud',
+'dbpassword' => 'DB_PASSWORD_REDACTED',
+\end{lstlisting}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.9\textwidth]{images/config-php-leak.png}
+\caption{Mot de passe de base de données exposé en clair dans config.php}
+\label{fig:config-leak}
+\end{figure}
+
+\subsubsection{Étape 4 --- Accès à la base de données et exfiltration}
+
+Avec les identifiants extraits, la connexion directe à MariaDB (toujours
+depuis Kali, démontrant la portée de l'exposition réseau identifiée au
+\S\,\ref{sec:nmap}) a été établie sans aucune restriction :
+
+\begin{lstlisting}[language=bash, caption={Connexion à la base de données avec les identifiants extraits}]
+mariadb -h 192.168.1.20 -u nextcloud -p
+USE nextcloud;
+SHOW TABLES;
+SELECT uid, password FROM oc_users;
+\end{lstlisting}
+
+La requête retourne l'intégralité des comptes Nextcloud et leurs
+empreintes de mot de passe (hachage \textbf{Argon2id}, algorithme
+résistant au cassage par calcul massivement parallèle, ce qui limite
+l'impact immédiat de cette fuite mais démontre néanmoins une exposition
+complète des données applicatives).
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.9\textwidth]{images/mariadb-oc-users.png}
+\caption{Accès complet à la table des utilisateurs Nextcloud depuis le poste attaquant}
+\label{fig:mariadb-access}
+\end{figure}
+
+\subsubsection{Synthèse de la chaîne d'attaque}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|c|l|l|}
+\hline
+\textbf{Étape} & \textbf{Technique} & \textbf{Résultat} \\
+\hline
+1 & Scan réseau (Nmap) & Découverte des services exposés \\
+2 & OSINT + génération de dictionnaire (CUPP) & Liste de mots de passe ciblée \\
+3 & Force brute SSH (Hydra) & Accès shell sur Server-Nextcloud \\
+4 & Lecture de configuration & Mot de passe de base de données \\
+5 & Connexion directe à la base & Exfiltration des comptes utilisateurs \\
+\hline
+\end{tabular}
+\caption{Synthèse de la chaîne d'attaque complète}
+\label{tab:synthese-attaque}
+\end{table}
+
+Cette chaîne illustre un principe central de la sécurité réseau :
+\textbf{une seule porte ouverte (SSH avec mot de passe faible) suffit à
+compromettre l'ensemble de la chaîne applicative}, dès lors qu'aucune
+segmentation ni principe de moindre privilège n'est appliqué. C'est
+précisément ce que la Phase B (architecture Zero Trust) se propose de
+corriger.
+
+\subsection{Interception du trafic réseau non chiffré}
+\label{sec:sniffing}
+
+\subsubsection{Limite du sniffing passif sur réseau commuté}
+
+Une première tentative de capture du trafic entre \texttt{Client-Debian}
+et \texttt{Server-Nextcloud} depuis Kali s'est révélée infructueuse (0
+paquet capturé). Ce résultat, bien que négatif, constitue une
+observation pédagogique importante : contrairement à un réseau basé sur
+un concentrateur (\emph{hub}), un réseau commuté (\emph{switch}, tel que
+simulé par le réseau interne VirtualBox) n'achemine le trafic qu'entre
+l'émetteur et le destinataire concernés. Une machine tierce ne peut donc
+intercepter passivement que son propre trafic, sauf à mettre en œuvre
+une attaque active de type \emph{Man-in-the-Middle} (ARP spoofing), non
+réalisée dans le cadre de ce test.
+
+\subsubsection{Capture réussie}
+
+La capture a été reproduite en initiant la connexion directement depuis
+le poste attaquant :
+
+\begin{lstlisting}[language=bash, caption={Capture du trafic HTTP}]
+sudo tcpdump -i eth0 -w capture.pcap host 192.168.1.30 and port 80
+\end{lstlisting}
+
+Une connexion au compte \texttt{jdupont} a ensuite été effectuée depuis
+le navigateur de Kali, pendant que la capture était active (1\,153
+paquets capturés). L'analyse avec Wireshark (filtre
+\texttt{http.request.method == "POST"}, puis \emph{Follow HTTP Stream})
+révèle le contenu intégral de la requête de connexion :
+
+\begin{lstlisting}[caption={Identifiants en clair interceptés dans le flux HTTP}]
+POST /index.php/login HTTP/1.1
+Host: 192.168.1.30
+...
+user=jdupont&password=Jdupont123&rememberme=1...
+\end{lstlisting}
+
+\begin{figure}[h]
+\centering
+% \includegraphics[width=0.9\textwidth]{images/wireshark-http-stream.png}
+\caption{Nom d'utilisateur et mot de passe visibles en clair dans le flux HTTP intercepté}
+\label{fig:wireshark-stream}
+\end{figure}
+
+\textbf{Analyse} : l'absence de chiffrement (HTTP au lieu de HTTPS) sur
+la page d'authentification permet à tout observateur positionné sur le
+chemin réseau d'obtenir les identifiants complets d'un utilisateur, sans
+nécessiter de cassage de mot de passe. Cette vulnérabilité sera corrigée
+en Phase B par la mise en place d'un reverse proxy Traefik imposant le
+chiffrement TLS de bout en bout.
+
+\section{Synthèse de la Phase A}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Attaque} & \textbf{Statut} & \textbf{Vulnérabilité exploitée} \\
+\hline
+Scan réseau & Réussi & Absence de filtrage, tous les services visibles \\
+Force brute SSH & Réussi (2 min) & Mot de passe faible et prévisible \\
+Extraction de configuration & Réussi & Identifiants stockés en clair \\
+Accès direct base de données & Réussi & Base de données non filtrée réseau \\
+Mouvement latéral & Réussi & Absence de segmentation \\
+Interception de trafic & Réussi (depuis l'hôte) & Absence de chiffrement TLS \\
+\hline
+\end{tabular}
+\caption{Bilan des attaques de la Phase A --- baseline avant sécurisation}
+\label{tab:bilan-phase-a}
+\end{table}
+
+Ce bilan constitue la ligne de référence \textit{« avant »} du tableau
+de validation final (Step 12), qui sera complété après la mise en œuvre
+de l'architecture Zero Trust en Phase B par la ligne \textit{« après »}
+correspondante, permettant de mesurer objectivement la réduction de la
+surface d'attaque obtenue.

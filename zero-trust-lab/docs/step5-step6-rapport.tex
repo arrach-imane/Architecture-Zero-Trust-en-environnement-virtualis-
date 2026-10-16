@@ -1,0 +1,481 @@
+% =====================================================================
+% Chapitre : Phase B - Étape 5 (Segmentation réseau) et Étape 6
+% (Règles de pare-feu Zero Trust)
+% =====================================================================
+
+\chapter{Segmentation réseau et politique de pare-feu (Zero Trust)}
+
+\section{Introduction}
+
+Après avoir démontré en phase A qu'une architecture réseau plate expose
+l'ensemble des services à toute machine compromise sur le réseau (voir
+chapitre précédent, chaîne d'attaque complète depuis Kali jusqu'à
+l'exfiltration des identifiants Nextcloud), la phase B du projet consiste
+à reconstruire l'infrastructure selon les principes Zero Trust. La première
+brique de cette reconstruction est la \textbf{segmentation réseau} : au lieu
+d'un réseau unique où toutes les machines peuvent se joindre librement,
+le réseau est désormais découpé en six segments isolés, chacun avec un rôle
+précis, reliés uniquement via un pare-feu central (OPNsense) qui applique
+une politique de moindre privilège.
+
+Ce chapitre documente deux étapes indissociables : l'\textbf{étape 5}
+(conception et mise en place de la segmentation : interfaces virtuelles,
+adressage, migration des machines) et l'\textbf{étape 6} (définition et
+implémentation des règles de pare-feu qui donnent corps à cette segmentation).
+Ces deux étapes sont en réalité fortement couplées : une segmentation réseau
+sans règles de filtrage précises n'apporte aucune sécurité, un point que ce
+chapitre met explicitement en évidence à travers une erreur de configuration
+réelle rencontrée durant le projet.
+
+\section{Étape 5 — Segmentation réseau}
+
+\subsection{Conception de l'architecture segmentée}
+
+Le réseau plat de la phase A (un unique sous-réseau \texttt{192.168.1.0/24})
+est remplacé par six segments distincts, chacun représenté par une
+interface dédiée du pare-feu OPNsense. Le tableau~\ref{tab:segments}
+résume l'architecture cible.
+
+\begin{table}[h]
+\centering
+\caption{Plan d'adressage des segments réseau}
+\label{tab:segments}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Segment} & \textbf{Interface OPNsense} & \textbf{Sous-réseau} & \textbf{Rôle} \\
+\hline
+MGMT & LAN (em1) & 10.10.1.0/24 & Administration du lab \\
+IAM / DMZ & OPT1 (em2) & 10.10.2.0/24 & Identité (Keycloak, Authelia, Traefik) \\
+APPS & OPT2 (em3) & 10.10.3.0/24 & Applications (Server-Nextcloud) \\
+DB & OPT3 (em4) & 10.10.4.0/24 & Base de données (Server-DB) \\
+ATTACKER & OPT4 (em5) & 10.10.5.0/24 & Poste attaquant (Kali) \\
+MONITORING & OPT5 (em6) & 10.10.6.0/24 & Supervision (Wazuh) \\
+\hline
+\end{tabular}
+\end{table}
+
+Cette séparation matérialise un principe central du Zero Trust : la
+confiance n'est plus implicite du simple fait d'être « sur le réseau
+interne ». Chaque segment ne doit pouvoir communiquer qu'avec les segments
+strictement nécessaires à sa fonction, et dans un seul sens quand c'est
+pertinent (voir \ref{sec:lecon-lateral}).
+
+\subsection{Limitation de l'interface graphique VirtualBox et contournement}
+
+La machine virtuelle du pare-feu (\texttt{OPNsense-FW}) nécessite sept
+interfaces réseau : une interface WAN (connexion à la machine hôte) et six
+interfaces internes, une par segment. Or l'interface graphique de
+VirtualBox n'affiche que quatre onglets d'adaptateurs réseau par VM, même
+après avoir sélectionné un chipset \texttt{ICH9} (qui supporte pourtant
+jusqu'à huit adaptateurs). Les interfaces 5 à 8 ne sont configurables que
+via la ligne de commande \texttt{VBoxManage}.
+
+\begin{lstlisting}[language=bash, caption={Ajout des adaptateurs réseau 5 à 7 via VBoxManage}]
+VBoxManage modifyvm "OPNsense-FW" --nic5 intnet --intnet5 "intnet-apps"
+VBoxManage modifyvm "OPNsense-FW" --nic6 intnet --intnet6 "intnet-db"
+VBoxManage modifyvm "OPNsense-FW" --nic7 intnet --intnet7 "intnet-attacker"
+\end{lstlisting}
+
+Chaque réseau interne (\texttt{intnet-*}) correspond à un segment isolé :
+seules les VM dont l'adaptateur réseau pointe vers le même nom de réseau
+interne peuvent échanger des trames Ethernet entre elles — et uniquement
+via OPNsense, qui est la seule machine connectée à tous ces réseaux
+internes simultanément.
+
+\subsection{Assignation et adressage des interfaces OPNsense}
+
+Au premier démarrage après l'ajout des interfaces, la console OPNsense
+propose de réassigner les interfaces physiques (\texttt{em0} à
+\texttt{em6}) aux rôles logiques (WAN, LAN, OPT1 à OPT5). L'identification
+se fait par adresse MAC, affichée pour chaque interface détectée. Le WAN
+est assigné en premier (interface connectée à la machine hôte), puis LAN
+et les cinq interfaces OPT dans l'ordre du plan d'adressage.
+
+Chaque interface reçoit ensuite son adresse IP via le menu console
+« Set interface IP address », reproduisant le tableau~\ref{tab:segments} :
+OPNsense porte systématiquement le premier hôte de chaque sous-réseau
+(ex. \texttt{10.10.3.1/24} pour APPS), qui sert de passerelle par défaut
+aux machines de ce segment.
+
+\subsection{Migration des machines existantes}
+
+Les trois machines déjà installées en phase A (Server-DB, Server-Nextcloud,
+Kali-Attacker) doivent être déplacées vers leurs nouveaux segments. Cette
+migration comporte systématiquement deux volets : changer l'adaptateur
+réseau virtuel de la VM (dans les paramètres VirtualBox, passer de
+l'ancien réseau \texttt{intnet-lan} unique vers le nouveau réseau interne
+dédié), puis reconfigurer l'adresse IP statique à l'intérieur de l'OS invité.
+
+\begin{lstlisting}[caption={Configuration réseau statique type (\texttt{/etc/network/interfaces})}]
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    address 10.10.5.50/24
+    gateway 10.10.5.1
+    dns-nameservers 10.10.5.1
+\end{lstlisting}
+
+Cette migration, en apparence triviale, a mis en évidence plusieurs
+difficultés concrètes documentées ci-dessous, car chacune illustre un
+piège réaliste que rencontrerait n'importe quel administrateur effectuant
+une telle migration en production.
+
+\subsubsection{Comportement « default-deny » des nouvelles interfaces OPNsense}
+
+Après avoir migré Server-DB vers le segment DB (\texttt{10.10.4.20/24}),
+le ping vers la passerelle (\texttt{10.10.4.1}) échouait à 100\,\%, alors
+que la configuration IP de la machine était correcte. La cause n'était pas
+un problème de configuration côté VM, mais un comportement par défaut
+d'OPNsense : contrairement à l'interface LAN historique, qui est créée
+avec une règle « autoriser tout le trafic sortant » par défaut lors de
+l'installation, toute nouvelle interface OPT créée ultérieurement
+\textbf{ne possède aucune règle autorisée par défaut}. Le pare-feu bloque
+donc tout, y compris un simple ping vers sa propre passerelle, tant
+qu'aucune règle explicite n'est ajoutée sur cet onglet. L'ajout d'une
+règle temporaire « Pass Any » sur l'onglet OPT3 a résolu ce point de
+blocage initial (règle qui sera ensuite resserrée à l'étape 6).
+
+\subsubsection{Le problème de démarrage circulaire de \texttt{occ} (Nextcloud)}
+
+Une fois Server-Nextcloud migré vers \texttt{10.10.3.30/24}, il fallait
+indiquer à Nextcloud la nouvelle adresse de la base de données. La méthode
+recommandée par Nextcloud consiste à utiliser son outil en ligne de
+commande :
+
+\begin{lstlisting}[language=bash]
+sudo -u www-data php /var/www/nextcloud/occ config:system:set dbhost --value="10.10.4.20"
+\end{lstlisting}
+
+Cette commande a échoué avec une exception Doctrine/DBAL non gérée
+(\texttt{Failed to connect to the database}). La raison est un problème
+d'amorçage circulaire : \texttt{occ} est lui-même une application PHP qui
+doit charger l'ensemble du framework Nextcloud — y compris établir une
+connexion à la base de données — avant de pouvoir exécuter \emph{n'importe
+quelle} commande, y compris celle censée corriger précisément cette
+connexion. Tant que l'ancienne adresse de base de données
+(\texttt{192.168.1.20}, devenue injoignable) figure dans la configuration,
+\texttt{occ} ne peut tout simplement pas démarrer.
+
+La solution a consisté à contourner \texttt{occ} et éditer directement le
+fichier de configuration PHP :
+
+\begin{lstlisting}[language=bash]
+sudo nano /var/www/nextcloud/config/config.php
+\end{lstlisting}
+
+\begin{lstlisting}[language=php, caption={Extrait corrigé de config.php}]
+'dbhost' => '10.10.4.20',
+'trusted_domains' =>
+array (
+    0 => 'localhost',
+    1 => '10.10.3.30',
+    2 => '10.10.1.50',
+),
+\end{lstlisting}
+
+\subsubsection{Contrôle d'accès MariaDB lié à l'hôte d'origine}
+
+Après correction de \texttt{config.php}, \texttt{occ status} renvoyait une
+nouvelle erreur distincte :
+
+\begin{lstlisting}
+SQLSTATE[HY000] [1130] Host '10.10.3.30' is not allowed to
+connect to this MariaDB server
+\end{lstlisting}
+
+Ce message illustre un point pédagogique important : la segmentation
+réseau (gérée par OPNsense) et le contrôle d'accès applicatif (géré par
+MariaDB) sont deux couches de sécurité \textbf{indépendantes}. Même si le
+pare-feu autorise désormais le trafic entre APPS et DB, MariaDB maintient
+sa propre liste d'autorisations par couple \texttt{utilisateur@hôte}. Le
+compte \texttt{nextcloud} avait été créé en phase A avec un hôte autorisé
+basé sur l'ancien sous-réseau (\texttt{nextcloud'@'192.168.1.\%}), qui ne
+correspond plus à la nouvelle adresse de Nextcloud. C'est un exemple
+concret de \emph{défense en profondeur} : même si un attaquant contourne
+le pare-feu (ou si celui-ci est mal configuré), l'application elle-même
+applique ses propres restrictions d'accès, et une migration réseau doit
+donc être répercutée à chaque couche indépendamment.
+
+La correction consiste à créer un compte scoped sur l'adresse exacte de
+Nextcloud plutôt que de réutiliser un sous-réseau trop large, puis à
+supprimer l'ancien compte :
+
+\begin{lstlisting}[language=sql]
+CREATE USER 'nextcloud'@'10.10.3.30' IDENTIFIED BY 'DB_PASSWORD_REDACTED';
+GRANT ALL PRIVILEGES ON nextcloud.* TO 'nextcloud'@'10.10.3.30';
+FLUSH PRIVILEGES;
+DROP USER 'nextcloud'@'192.168.1.%';
+\end{lstlisting}
+
+Après cette correction, \texttt{occ status} confirme
+\texttt{installed: true}.
+
+\subsubsection{Corruption du fichier de configuration réseau sur Kali}
+
+Lors de la migration de Kali-Attacker, une édition en place de
+\texttt{/etc/network/interfaces} a fusionné accidentellement l'ancien bloc
+de configuration DHCP avec le nouveau bloc statique, sans supprimer le
+premier — allant jusqu'à concaténer une ligne de commentaire directement
+à la suite de la ligne \texttt{iface eth0 inet dhcp}. Le service réseau
+refusait alors de démarrer (\texttt{control process exited with error
+code}), laissant l'interface \texttt{eth0} dans l'état \texttt{DOWN}. La
+correction la plus sûre dans ce cas n'est pas une édition supplémentaire
+du fichier corrompu, mais une réécriture atomique complète via un
+here-document, qui garantit un fichier final cohérent :
+
+\begin{lstlisting}[language=bash]
+sudo tee /etc/network/interfaces > /dev/null << 'EOF'
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    address 10.10.5.50/24
+    gateway 10.10.5.1
+    dns-nameservers 10.10.5.1
+EOF
+\end{lstlisting}
+
+\subsection{Cas particulier : le poste d'administration (client-debian)}
+
+Le segment MGMT est administré depuis une machine virtuelle Debian
+dédiée (\texttt{client-debian}, \texttt{10.10.1.50/24}), distincte des
+serveurs applicatifs. Un point notable rencontré sur cette machine : son
+interface \texttt{enp0s3} est marquée \texttt{unmanaged} par
+NetworkManager (car définie statiquement dans
+\texttt{/etc/network/interfaces}), ce qui rend les commandes
+\texttt{nmcli} inopérantes pour modifier sa configuration DNS. Le fichier
+\texttt{/etc/resolv.conf} restait bloqué sur l'ancienne passerelle
+(\texttt{192.168.1.1}) malgré un \texttt{dns-nameservers 10.10.1.1}
+correctement présent dans \texttt{/etc/network/interfaces} et plusieurs
+redémarrages du service \texttt{networking}. La correction a nécessité une
+édition directe de \texttt{/etc/resolv.conf} (fichier simple, non
+symbolique, qui n'était régénéré par aucun service actif une fois
+l'interface marquée \texttt{unmanaged}).
+
+\section{Étape 6 — Politique de pare-feu (règles de moindre privilège)}
+
+\subsection{Une leçon essentielle : la direction du trafic et le mouvement latéral}
+\label{sec:lecon-lateral}
+
+Une fois les quatre machines actives migrées, un test de vérification a
+révélé un problème critique : des pings lancés depuis Kali-Attacker
+(\texttt{10.10.5.50}) vers Server-Nextcloud (\texttt{10.10.3.30}) et
+Server-DB (\texttt{10.10.4.20}) \textbf{réussissaient}, alors que la
+segmentation était censée les en empêcher.
+
+La cause provenait des règles temporaires ajoutées lors de la migration
+pour résoudre le comportement default-deny (voir plus haut) : des règles
+du type \texttt{Pass, Source: OPTn net, Destination: Any} avaient été
+laissées en place sur chaque interface. Sur un pare-feu de type
+OPNsense/pfSense, les règles sont évaluées sur l'interface par laquelle le
+trafic \emph{entre} dans le pare-feu, et une destination \texttt{Any} ne
+signifie pas « Internet » mais littéralement \emph{toute destination
+atteignable}, y compris les segments internes voisins. Une règle pensée
+pour autoriser « l'accès à Internet » autorisait donc, sans le vouloir,
+le mouvement latéral complet entre tous les segments internes — annulant
+de fait tout le travail de segmentation réalisé à l'étape 5.
+
+Cette découverte est la motivation directe de la conception rigoureuse des
+règles ci-dessous : chaque segment ne doit avoir que des règles
+\textbf{explicites}, limitées à des destinations et des ports précis,
+jamais une règle large « par commodité ».
+
+\subsection{Principe de conception des règles}
+
+Pour chaque segment, les règles ont été conçues en répondant à une
+question simple : « de quoi cette machine a-t-elle réellement besoin pour
+fonctionner, et rien de plus ? ». Le tableau~\ref{tab:regles} résume la
+politique retenue pour les quatre segments actifs du lab.
+
+\begin{table}[h]
+\centering
+\caption{Règles de pare-feu par segment (moindre privilège)}
+\label{tab:regles}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\textbf{Segment} & \textbf{Destination autorisée} & \textbf{Port(s)} & \textbf{Justification} \\
+\hline
+ATTACKER & Internet (Any) & 80, 443 & Aucun accès interne \\
+APPS & 10.10.4.20 (DB) & 3306 & Connexion base de données \\
+APPS & Internet (Any) & 80, 443 & Mises à jour, apps Nextcloud \\
+DB & \emph{aucune} & \emph{aucune} & N'initie jamais de connexion \\
+MGMT & Any & 443 & Administration web (OPNsense, futurs services) \\
+MGMT & Any & 22 & Administration SSH \\
+MGMT & Any & 80, 53 & Internet + résolution DNS \\
+\hline
+\end{tabular}
+\end{table}
+
+Le cas du segment DB illustre un principe de sécurité réseau important :
+une base de données n'a, par nature, jamais besoin d'initier une connexion
+sortante — elle ne fait qu'écouter et répondre. L'absence totale de règle
+sortante sur l'interface OPT3 n'empêche pourtant pas Server-DB de répondre
+aux requêtes légitimes d'APPS, car OPNsense est un pare-feu à états
+(\emph{stateful}) : le trafic de retour d'une connexion déjà autorisée en
+entrée (APPS vers DB) est automatiquement accepté sans règle explicite
+supplémentaire. Documenter et vérifier ce comportement a permis de
+confirmer qu'une politique de filtrage strict côté DB n'introduit aucune
+régression fonctionnelle.
+
+\subsection{Implémentation et vérification, segment par segment}
+
+Chaque segment a été vérifié immédiatement après application des règles,
+en combinant un test fonctionnel positif (le service continue de
+fonctionner) et un test négatif (l'accès non désiré échoue effectivement).
+
+\begin{lstlisting}[caption={Vérification ATTACKER : aucun mouvement latéral}]
+$ ping -c 3 10.10.3.30
+3 packets transmitted, 0 received, 100% packet loss
+
+$ ping -c 3 10.10.4.20
+3 packets transmitted, 0 received, 100% packet loss
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Vérification APPS : service fonctionnel, mouvement latéral bloqué}]
+$ sudo -u www-data php /var/www/nextcloud/occ status
+  - installed: true
+
+$ ping -c 3 10.10.5.50
+3 packets transmitted, 0 received, 100% packet loss
+\end{lstlisting}
+
+\begin{lstlisting}[caption={Vérification DB : aucune règle sortante, service toujours accessible}]
+# Depuis Server-Nextcloud, après suppression de toute règle sortante sur OPT3 :
+$ sudo -u www-data php /var/www/nextcloud/occ status
+  - installed: true
+\end{lstlisting}
+
+\subsection{Un bug de configuration réaliste : la règle SSH en IPv6}
+
+La vérification du segment MGMT a révélé un bug de configuration subtil,
+suffisamment instructif pour être documenté intégralement. La règle
+autorisant l'administration SSH (\texttt{MGMT -> Any SSH}) avait été créée
+avec la famille d'adresses \textbf{IPv6} au lieu d'IPv4 — une valeur par
+défaut du formulaire OPNsense passée inaperçue à la création. Or
+l'ensemble du laboratoire fonctionne exclusivement en IPv4
+(\texttt{10.10.x.x}) : cette règle ne filtrait donc jamais aucun trafic
+réel, et toute tentative de connexion SSH était silencieusement rejetée
+par la règle implicite \texttt{Default deny} d'OPNsense, sans que la
+configuration déclarée (« une règle SSH existe ») ne corresponde au
+comportement observé.
+
+Le diagnostic a été posé grâce au journal temps réel d'OPNsense
+(\emph{Firewall > Log Files > Live View}), qui a montré explicitement le
+paquet SSH rejeté sur l'interface LAN par la règle \texttt{Default deny /
+state violation rule} :
+
+\begin{lstlisting}
+Interface  Action  Label
+LAN        block   Default deny / state violation rule
+  Source: 10.10.1.50   Destination: 10.10.3.30:22
+\end{lstlisting}
+
+Ce cas illustre un principe méthodologique central pour l'administration
+de pare-feu : \textbf{ne jamais faire confiance à la configuration
+déclarée sans la vérifier dans les journaux de trafic réel}. Une règle
+peut exister, apparaître correcte à la lecture, et pourtant ne filtrer
+aucun paquet du trafic visé si un paramètre secondaire (ici la famille
+d'adresses) ne correspond pas au trafic réel. La correction (changement de
+\texttt{IPv6} vers \texttt{IPv4} dans le champ \emph{Address Family} de la
+règle) a immédiatement résolu le problème, confirmé par un test de port :
+
+\begin{lstlisting}
+$ nc -zv -w 3 10.10.3.30 22
+10.10.3.30 [10.10.3.30] 22 (ssh) open
+\end{lstlisting}
+
+\subsection{Résolution DNS pour le segment MGMT}
+
+Un second point a nécessité une règle supplémentaire non anticipée
+initialement : la résolution de noms de domaine (DNS) utilise le port 53,
+distinct des ports web (80/443) déjà autorisés. Sans règle explicite pour
+ce port, client-debian pouvait joindre Internet par adresse IP mais pas
+par nom de domaine (\texttt{Temporary failure in name resolution}). Une
+règle \texttt{MGMT -> Any, port 53 (TCP/UDP)} a été ajoutée pour corriger
+ce point, rappelant qu'une politique de moindre privilège doit être
+construite en identifiant \emph{tous} les protocoles réellement utilisés
+par un service, DNS étant souvent oublié car invisible lors d'un usage
+normal.
+
+\section{Segments documentés pour implémentation ultérieure}
+
+Les segments IAM/DMZ et MONITORING ne portent encore aucune machine
+virtuelle à ce stade du projet (ils seront respectivement peuplés aux
+étapes 7 à 9 pour Keycloak/Authelia/Traefik, et à l'étape 10 pour Wazuh).
+Leur politique de filtrage a néanmoins été conçue par anticipation, afin
+de garantir la cohérence de l'architecture Zero Trust dès l'installation
+de ces services.
+
+\subsection{IAM / DMZ (10.10.2.0/24)}
+
+\begin{itemize}
+    \item IAM $\rightarrow$ DB (\texttt{10.10.4.20:3306}) : Keycloak
+    nécessite sa propre base de données.
+    \item IAM $\rightarrow$ Internet (80/443) : mises à jour, éventuels
+    appels OIDC externes.
+    \item APPS $\rightarrow$ IAM (443) : Nextcloud devra rediriger
+    l'authentification vers Authelia/Traefik.
+    \item MGMT $\rightarrow$ IAM (443, déjà couvert par la règle MGMT
+    existante).
+    \item Aucune règle IAM $\rightarrow$ APPS, ATTACKER ou MONITORING.
+\end{itemize}
+
+\subsection{MONITORING (10.10.6.0/24)}
+
+\begin{itemize}
+    \item APPS, DB, IAM, ATTACKER $\rightarrow$ MONITORING, ports agent
+    Wazuh (1514/1515 TCP) : les agents remontent leurs événements vers le
+    serveur central.
+    \item MONITORING $\rightarrow$ Internet (80/443) : mise à jour des
+    règles de détection.
+    \item MGMT $\rightarrow$ MONITORING (443) : accès au tableau de bord
+    Wazuh.
+    \item \textbf{Aucune} règle MONITORING $\rightarrow$ autres segments.
+\end{itemize}
+
+Ce dernier point est un choix de conception Zero Trust délibéré : le flux
+de supervision est strictement unidirectionnel, des machines surveillées
+vers le collecteur (\emph{push}), jamais l'inverse. Cela limite
+drastiquement la surface d'attaque exploitable si le serveur de
+supervision venait lui-même à être compromis : il ne pourrait pas servir
+de rebond vers les autres segments.
+
+\section{Synthèse}
+
+Le tableau~\ref{tab:synthese-step6} résume l'état de la segmentation et
+du filtrage à l'issue de l'étape 6.
+
+\begin{table}[h]
+\centering
+\caption{État des segments à l'issue de l'étape 6}
+\label{tab:synthese-step6}
+\begin{tabular}{|l|l|l|}
+\hline
+\textbf{Segment} & \textbf{Règles de pare-feu} & \textbf{État} \\
+\hline
+ATTACKER & Implémentées et vérifiées & Opérationnel \\
+APPS & Implémentées et vérifiées & Opérationnel \\
+DB & Implémentées et vérifiées & Opérationnel \\
+MGMT & Implémentées et vérifiées & Opérationnel \\
+IAM / DMZ & Conçues, non implémentées & En attente (étapes 7-9) \\
+MONITORING & Conçues, non implémentées & En attente (étape 10) \\
+\hline
+\end{tabular}
+\end{table}
+
+Cette phase a permis de transformer le réseau plat et vulnérable de la
+phase A en une architecture segmentée où chaque composant ne dispose que
+des accès strictement nécessaires à son fonctionnement. Elle a également
+mis en évidence, à travers des incidents réels rencontrés durant la mise
+en œuvre (règles trop permissives, bug de famille d'adresses IPv6, port
+DNS oublié), que la segmentation réseau est un exercice itératif qui
+nécessite une vérification systématique par les journaux de trafic, et
+non une simple confiance dans la configuration déclarée. L'étape 12 du
+projet consistera à rejouer la chaîne d'attaque de la phase A sur cette
+nouvelle architecture, afin de mesurer concrètement l'efficacité de cette
+segmentation face aux mêmes techniques d'attaque.

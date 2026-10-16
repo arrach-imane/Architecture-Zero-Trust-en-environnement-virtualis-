@@ -1,0 +1,14 @@
+# Configuration dynamique Traefik — certificat TLS du lab
+# TEMPLATE : remplace par le chemin de ton propre certificat/clé.
+# ⚠️ Ne jamais committer de clé privée (.key) dans ce dossier —
+#    .gitignore l'exclut déjà, mais double-vérifie avant de pousser.
+
+tls:
+  certificates:
+    - certFile: /etc/traefik/tls/lab.crt
+      keyFile: /etc/traefik/tls/lab.key
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/tls/lab.crt
+        keyFile: /etc/traefik/tls/lab.key

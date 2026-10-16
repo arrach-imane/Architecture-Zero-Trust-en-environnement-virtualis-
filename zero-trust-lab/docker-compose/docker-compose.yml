@@ -1,0 +1,79 @@
+# =============================================================================
+# Stack IAM / DMZ — Keycloak + Traefik + Authelia
+# Segment IAM/DMZ (10.10.2.0/24) de l'architecture Zero Trust
+#
+# ⚠️  TEMPLATE : remplace chaque valeur CHANGE_ME par tes propres secrets
+#     avant de lancer la stack. Ne commite jamais le fichier .env réel
+#     (il est exclu par .gitignore).
+# =============================================================================
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    container_name: keycloak
+    command: start --optimized
+    environment:
+      KC_DB: mariadb
+      KC_DB_URL: jdbc:mariadb://${KC_DB_HOST}:3306/${KC_DB_NAME}
+      KC_DB_USERNAME: ${KC_DB_USER}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD}
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME}
+      KC_PROXY: edge
+    networks:
+      - iam-dmz
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.file.directory=/etc/traefik/dynamic"
+      - "--providers.file.watch=true"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--api.dashboard=true"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../configs/traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./tls:/etc/traefik/tls:ro
+    networks:
+      - iam-dmz
+    restart: unless-stopped
+
+  authelia:
+    image: authelia/authelia:4.38
+    container_name: authelia
+    volumes:
+      - ../configs/authelia/configuration.yml:/config/configuration.yml:ro
+    environment:
+      AUTHELIA_JWT_SECRET: ${AUTHELIA_JWT_SECRET}
+      AUTHELIA_SESSION_SECRET: ${AUTHELIA_SESSION_SECRET}
+      AUTHELIA_STORAGE_ENCRYPTION_KEY: ${AUTHELIA_STORAGE_ENCRYPTION_KEY}
+    networks:
+      - iam-dmz
+    expose:
+      - "9091"
+    restart: unless-stopped
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.authelia.rule=Host(`auth.${LAB_DOMAIN}`)"
+      - "traefik.http.routers.authelia.entrypoints=websecure"
+      - "traefik.http.routers.authelia.tls=true"
+      - "traefik.http.middlewares.authelia.forwardauth.address=http://authelia:9091/api/verify?rd=https://auth.${LAB_DOMAIN}"
+      - "traefik.http.middlewares.authelia.forwardauth.trustForwardHeader=true"
+      - "traefik.http.middlewares.authelia.forwardauth.authResponseHeaders=Remote-User,Remote-Groups,Remote-Name,Remote-Email"
+
+networks:
+  iam-dmz:
+    driver: bridge
