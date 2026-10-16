@@ -1,8 +1,5 @@
 # Documentation
 
-Ce dossier contient les chapitres du rapport complet, extraits du document
-LaTeX principal (compilé avec un template `rapportENSIAS` / `rapportFST`).
-
 - `step3-step4-rapport.tex` — Phase A : réseau plat, mise en place de
   Server-DB et Server-Nextcloud, chaîne d'attaque complète (reconnaissance
   Nmap → OSINT/CUPP → brute force SSH Hydra → exfiltration MariaDB →
@@ -19,6 +16,3 @@ LaTeX principal (compilé avec un template `rapportENSIAS` / `rapportFST`).
 > quels : ils sont au cœur de la démonstration pédagogique de l'attaque par
 > force brute et ne correspondent à aucun compte réel réutilisé ailleurs.
 
-Pour compiler le rapport complet, ces chapitres doivent être inclus dans le
-document principal (`\input{}` ou `\include{}`) utilisant le template
-imposé par l'établissement.
