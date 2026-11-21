@@ -1,0 +1,55 @@
+# Configuration dynamique Traefik (provider « file »)
+# Point d'entrée unique : tout le trafic applicatif passe par ici.
+# À vérifier contre le fichier réel (reconstitué) : noms des middlewares et
+# chemins de certificats.
+
+http:
+  routers:
+    whoami:
+      rule: Host(`whoami.zerotrust.lab`)
+      entryPoints: [websecure]
+      service: whoami
+      middlewares: [authelia]
+      tls: {}
+    authelia:
+      rule: Host(`auth.zerotrust.lab`)
+      entryPoints: [websecure]
+      service: authelia
+      tls: {}
+    keycloak:
+      rule: Host(`keycloak.zerotrust.lab`)
+      entryPoints: [websecure]
+      service: keycloak
+      tls: {}
+    nextcloud:
+      rule: Host(`nextcloud.zerotrust.lab`)
+      entryPoints: [websecure]
+      service: nextcloud
+      middlewares: [authelia]
+      tls: {}
+
+  middlewares:
+    authelia:
+      forwardAuth:
+        address: http://authelia:9091/api/authz/forward-auth
+        trustForwardHeader: true
+        authResponseHeaders: [Remote-User, Remote-Groups, Remote-Email, Remote-Name]
+
+  services:
+    whoami:
+      loadBalancer:
+        servers: [{url: http://whoami:80}]
+    authelia:
+      loadBalancer:
+        servers: [{url: http://authelia:9091}]
+    keycloak:
+      loadBalancer:
+        servers: [{url: http://keycloak:8080}]
+    nextcloud:
+      loadBalancer:
+        servers: [{url: http://10.10.3.30:80}]   # Server-Nextcloud (segment APPS)
+
+tls:
+  certificates:
+    - certFile: /certs/zerotrust.lab.crt   # CN=*.zerotrust.lab + SAN, auto-signé
+      keyFile: /certs/zerotrust.lab.key    # jamais committé (.gitignore)
