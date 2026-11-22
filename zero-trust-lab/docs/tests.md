@@ -133,7 +133,7 @@ $ nc -zv -w3 10.10.1.50 22   -> Connection timed out
 $ nc -zv -w3 10.10.6.10 22   -> Connection timed out
 ```
 
-**Interprétation** : SSH vers APPS, base de données, poste d'administration et supervision sont tous inaccessibles depuis ATTACKER. La force brute SSH et l'accès direct à la DB de la Phase A ne peuvent plus démarrer. *(L'attaque Hydra elle-même n'a pas été relancée : le port fermé suffit à la rendre impossible.)*
+**Interprétation** : SSH vers APPS, base de données, poste d'administration et supervision sont tous inaccessibles depuis ATTACKER.
 
 ### T12 — Seul chemin autorisé vers Traefik, sans contenu applicatif
 
@@ -145,12 +145,26 @@ content-type: text/plain; charset=utf-8
 
 **Interprétation** : accédé par IP, Traefik ne trouve aucune route (`404`) et ne sert aucun contenu applicatif. Les services ne sont joignables que par leur nom de domaine, derrière Authelia.
 
+### T13 — Force brute SSH rejouée (Hydra) : échec immédiat
+
+En Phase A (réseau plat, Step 4), la même attaque avait réussi en moins de 2 minutes contre le compte de test `nextcloud-user`. Rejouée depuis Kali contre la Phase B, après la correction du T10 :
+
+```console
+$ hydra -l nextcloud-user -P imane_fast.txt -t 4 -f ssh://10.10.3.30
+Hydra v9.6 (c) 2023 by van Hauser/THC & David Maciejak
+[DATA] max 4 tasks per 1 server, overall 4 tasks, 22 login tries (l:1/p:22), ~6 tries per task
+[DATA] attacking ssh://10.10.3.30:22/
+[ERROR] could not connect to ssh://10.10.3.30:22 - Timeout connecting to 10.10.3.30
+```
+
+**Interprétation** : Hydra échoue dès l'étape de connexion, avant même de tester le premier mot de passe de la liste. Le port SSH étant inaccessible depuis ATTACKER (T11), l'attaque ne peut pas même démarrer — contrairement à la Phase A, où le mot de passe faible était trouvé en 2 minutes.
+
 ## 5. Bilan avant / après
 
 | Attaque | Phase A (réseau plat) | Phase B (Zero Trust) |
 |---|---|---|
 | Scan Nmap | Tous services visibles | Un seul point d'entrée visible (Traefik 80/443) ; le reste `filtered` (T10) |
-| Force brute SSH | Succès en 2 min | Impossible : port 22 inaccessible (T11) |
+| Force brute SSH | Succès en 2 min | Échec immédiat, connexion impossible (T11, T13) |
 | Extraction de configuration | Succès | Impossible : prérequis (accès SSH) bloqué |
 | Accès direct DB | Succès | Timeout sur 3306 (T11) |
 | Mouvement latéral | Succès | Timeout vers MGMT, APPS, MONITORING (T11) |
