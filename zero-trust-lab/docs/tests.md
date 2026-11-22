@@ -126,8 +126,6 @@ Non-régression : accès Internet de Kali conservé (`HTTP/2 200` sur un site pu
 
 **Leçon** : un test fait depuis le chemin légitime (T2, depuis IAM) ne prouve pas l'absence de chemin illicite. Seul le rejeu depuis le segment ATTACKER l'a révélé.
 
-**Amélioration restante (défense en profondeur)** : restreindre Apache sur Server-Nextcloud aux seules requêtes venant de Traefik (`Require ip 10.10.2.10`).
-
 ### T11 — Services internes depuis ATTACKER (après correction)
 
 ```console
@@ -163,7 +161,48 @@ Hydra v9.6 (c) 2023 by van Hauser/THC & David Maciejak
 
 **Interprétation** : Hydra échoue dès l'étape de connexion, avant même de tester le premier mot de passe de la liste. Le port SSH étant inaccessible depuis ATTACKER (T11), l'attaque ne peut pas même démarrer — contrairement à la Phase A, où le mot de passe faible était trouvé en 2 minutes.
 
-## 5. Bilan avant / après
+## 5. Validation finale : audit complet des règles OPNsense (Step 13)
+
+### T14 — Moindre privilège sur toutes les interfaces
+
+Le rejeu de la Phase A (T10) a révélé une règle trop large sur une seule interface (OPT4). Plutôt que de considérer le problème résolu, un audit a été mené sur **toutes** les interfaces du pare-feu, pour vérifier qu'aucune autre règle n'avait le même défaut (destination `*` trop permissive).
+
+**Résultat de l'audit** :
+
+| Interface | État avant audit | Action |
+|---|---|---|
+| LAN (MGMT) | 2 règles `MGMT -> Any SSH/HTTPS (admin)`, destination `*` : Client-Debian pouvait atteindre **n'importe quelle machine** en SSH/HTTPS, y compris en contournant Authelia | Corrigé |
+| OPT1 (IAM) | Règles « Web/Web S », destination `*` : portée Internet non restreinte | Corrigé |
+| OPT2 (APPS) | Règles « Internet HTTP/HTTPS », destination `*` : même défaut | Corrigé |
+| OPT3 (DB) | Aucune règle sortante superflue | Conforme, rien changé |
+| OPT4 (ATTACKER) | Déjà corrigé au T10 | — |
+| OPT5 (MONITORING) | Aucune règle définie | Conforme, rien changé |
+| WAN | Aucune règle définie | Conforme (lab non exposé) |
+
+**Le plus significatif : MGMT.** Le segment présenté comme le point de confiance le plus élevé du lab avait en réalité le moins de restrictions : une règle `destination *` laissait Client-Debian ouvrir une session SSH directe vers Nextcloud, la base de données ou Monitoring, **sans jamais passer par Traefik ni Authelia**. Un vrai modèle bastion authentifie et journalise chaque session individuellement ; une règle réseau large héritée du Step 6 n'en est pas un.
+
+**Correction appliquée, même méthode partout** : un alias des cibles légitimes (`HOTES_ADMINISTRES` pour MGMT : les 4 serveurs administrés) ou des exceptions de flux internes nécessaires (IAM → APPS sur le port 80 pour le reverse proxy ; APPS → IAM sur le port 443 pour la validation OIDC côté serveur), placées **avant** une règle Internet inversée sur l'alias `RFC1918` (accès web externe autorisé, réseaux privés refusés).
+
+**Tests de non-régression, après chaque correction** :
+
+```console
+# MGMT : administration préservée, périmètre restreint
+ssh nextcloud-user@10.10.3.30          -> connexion réussie (dans l'alias)
+nc -zv -w3 10.10.5.50 22               -> timeout (Kali, hors alias)
+curl -4 -m8 -sI https://nextcloud.zerotrust.lab  -> 302 vers Authelia (Traefik, dans l'alias)
+curl -4 -m8 -sI https://www.wikipedia.org        -> HTTP/2 200 (Internet préservé)
+
+# OPT1/OPT2 : SSO complet rejoué de bout en bout après correction
+# Authelia -> Keycloak (test.user) -> tableau de bord Nextcloud : succès
+nc -zv -w3 10.10.3.30 80                -> open (proxy Traefik -> Nextcloud préservé)
+curl -4 -m8 -sI http://example.com       -> 200 OK (Internet depuis IAM et APPS préservé)
+nc -zv -w3 10.10.4.20 80 (depuis IAM)    -> timeout (DB hors périmètre IAM)
+nc -zv -w3 10.10.1.50 80 (depuis APPS)   -> timeout (MGMT hors périmètre APPS)
+```
+
+**Deux fausses alertes rencontrées pendant l'audit, documentées pour la méthode** : un premier test MGMT a semblé échouer (timeout vers Nextcloud) — cause réelle : Server-DB et Server-IAM étaient simplement éteints, pas une erreur de règle. Un test Internet depuis APPS a aussi semblé échouer sur un nom de domaine précis (`neverssl.com`, code 28) alors qu'une IP publique directe (`1.1.1.1`) répondait sans problème — un deuxième essai a confirmé que c'était transitoire (DNS), pas une régression. **Leçon** : vérifier l'état des VMs et reproduire un test ambigu avant de conclure à une faille.
+
+## 6. Bilan avant / après
 
 | Attaque | Phase A (réseau plat) | Phase B (Zero Trust) |
 |---|---|---|
@@ -173,3 +212,4 @@ Hydra v9.6 (c) 2023 by van Hauser/THC & David Maciejak
 | Accès direct DB | Succès | Timeout sur 3306 (T11) |
 | Mouvement latéral | Succès | Timeout vers MGMT, APPS, MONITORING (T11) |
 | Interception HTTP | Succès | Seul chemin : Traefik/TLS, accès par IP rejeté (T12) |
+| Bastion MGMT non restreint | *(non testé en Phase A)* | Faille trouvée et corrigée à l'audit (T14) : périmètre d'administration restreint à 4 hôtes |
