@@ -32,18 +32,23 @@ un poste attaquant Kali Linux.
 Le réseau est redécoupé en six segments isolés, reliés uniquement via
 OPNsense qui applique une politique de moindre privilège :
 
-| Segment     | Sous-réseau    | Rôle                                         |
-|-------------|----------------|-----------------------------------------------|
-| MGMT        | 10.10.1.0/24   | Administration du lab                        |
-| IAM / DMZ   | 10.10.2.0/24   | Identité (Keycloak, Authelia, Traefik)       |
-| APPS        | 10.10.3.0/24   | Applications (Nextcloud)                     |
-| DB          | 10.10.4.0/24   | Base de données (MariaDB)                    |
-| ATTACKER    | 10.10.5.0/24   | Poste d'attaque (Kali)                       |
-| MONITORING  | 10.10.6.0/24   | Supervision (Wazuh)                          |
+| Segment     | Sous-réseau    | Machine (IP)                  | Rôle                                         |
+|-------------|----------------|-------------------------------|-----------------------------------------------|
+| MGMT        | 10.10.1.0/24   | Client-Debian (10.10.1.50)    | Administration du lab                        |
+| IAM / DMZ   | 10.10.2.0/24   | Server-IAM (10.10.2.10)       | Identité (Keycloak, Authelia, Traefik)       |
+| APPS        | 10.10.3.0/24   | Server-Nextcloud (10.10.3.30) | Applications (Nextcloud)                     |
+| DB          | 10.10.4.0/24   | Server-DB (10.10.4.20)        | Base de données (MariaDB)                    |
+| ATTACKER    | 10.10.5.0/24   | Kali (10.10.5.50)             | Poste d'attaque                              |
+| MONITORING  | 10.10.6.0/24   | Server-Monitoring (10.10.6.10)| Supervision (Wazuh)                          |
 
 Chaque segment ne communique qu'avec les segments strictement nécessaires
 à sa fonction (ex. le segment DB n'a aucune règle sortante : il ne fait que
 répondre aux requêtes déjà autorisées en entrée depuis APPS).
+
+Les services sont publiés sous `*.zerotrust.lab` derrière **Traefik, point
+d'entrée unique**, avec une double couche d'authentification : Authelia
+(mot de passe + TOTP) puis SSO Keycloak (OIDC) pour Nextcloud. Détails dans
+[zero-trust-lab/docs/architecture.md](zero-trust-lab/docs/architecture.md).
 
 ## Démarche
 
@@ -54,14 +59,17 @@ répondre aux requêtes déjà autorisées en entrée depuis APPS).
 2. **Step 5-6** — Phase B : segmentation réseau en six segments OPNsense et
    définition des règles de pare-feu selon le principe de moindre
    privilège, avec vérification positive/négative par segment.
-3. **Step 7-9** *(en cours)* — Déploiement de la brique IAM : Keycloak pour
-   la gestion des identités, Traefik en reverse proxy, Authelia pour
-   l'authentification multifacteur devant les applications.
-4. **Step 10** *(à venir)* — Supervision avec Wazuh sur le segment
-   MONITORING, flux de remontée strictement unidirectionnel.
-5. **Step 11-14** *(à venir)* — Durcissement final, rejeu complet de la
-   chaîne d'attaque de la Phase A sur l'architecture Zero Trust, tableau
-   de comparaison avant/après, conclusion.
+3. **Step 7-9** ✅ — Brique IAM : Keycloak (identités, realm `zerotrust`),
+   Traefik (reverse proxy), Authelia (MFA) et SSO OIDC vers Nextcloud.
+4. **Step 10** ✅ — Supervision Wazuh 4.14.9 sur le segment MONITORING,
+   4 agents, flux strictement unidirectionnel ([docs/wazuh.md](zero-trust-lab/docs/wazuh.md)).
+5. **Step 11** ✅ — Durcissement : TOTP obligatoire, port Keycloak 8080
+   retiré, URI de redirection exactes, secrets Authelia régénérés, compte
+   admin Keycloak permanent.
+6. **Step 12** *(en cours)* — Rejeu de la chaîne d'attaque de la Phase A
+   depuis Kali contre l'architecture Zero Trust.
+7. **Validation finale** *(à venir)* — Audit des règles OPNsense,
+   checklist de reproductibilité, tableau avant/après.
 
 ## Résultats (Phase A — baseline)
 
@@ -74,29 +82,30 @@ répondre aux requêtes déjà autorisées en entrée depuis APPS).
 | Mouvement latéral               | Réussi   | Absence de segmentation                      |
 | Interception de trafic          | Réussi   | Absence de chiffrement TLS                   |
 
-Le tableau « après » correspondant sera complété à l'issue du Step 12, une
-fois la chaîne d'attaque rejouée contre l'architecture Zero Trust.
+Le tableau « après » sera complété à l'issue du Step 12 (voir
+[docs/tests.md](zero-trust-lab/docs/tests.md)).
 
-## Documentation complète
+## Documentation
 
-Voir [docs/](docs/) pour les chapitres détaillés du rapport (contexte,
-commandes exactes, incidents rencontrés et leur résolution, captures
-d'écran référencées).
+- [Architecture](zero-trust-lab/docs/architecture.md)
+- [Tests de validation](zero-trust-lab/docs/tests.md)
+- [Déploiement Wazuh](zero-trust-lab/docs/wazuh.md)
+- [Limites connues](zero-trust-lab/docs/limits.md)
+- [Guide de publication](zero-trust-lab/GIT-SETUP.md)
 
 ## Stack technique
 
 OPNsense · VirtualBox (réseaux internes isolés) · Debian 13 · MariaDB ·
-Nextcloud · Keycloak · Traefik · Authelia · Wazuh *(à venir)* · Kali Linux ·
-Nmap · Hydra · CUPP · Wireshark
+Nextcloud · Keycloak 26 · Traefik 3.3 · Authelia 4.38 · Wazuh 4.14.9 ·
+Kali Linux · Nmap · Hydra · CUPP · Wireshark
 
 ## Avertissement sur les identifiants
 
 Ce lab tourne entièrement dans des réseaux privés non routables
-(`10.10.x.x`, `192.168.x.x`). Les mots de passe d'infrastructure réels ont
-été retirés des fichiers publiés ici (voir [docs/README.md](docs/README.md)
-pour le détail) ; les mots de passe volontairement faibles attribués aux
-comptes de test, eux, sont conservés tels quels car ils sont au cœur de la
-démonstration de l'attaque par force brute.
+(`10.10.x.x`, `192.168.x.x`). Aucun secret d'infrastructure n'est publié
+(clés, hashs, mots de passe admin : placeholders — voir `.env.example`) ; les
+mots de passe volontairement faibles des comptes de test sont conservés car
+ils sont au cœur de la démonstration de la force brute.
 
 ## Auteure
 
