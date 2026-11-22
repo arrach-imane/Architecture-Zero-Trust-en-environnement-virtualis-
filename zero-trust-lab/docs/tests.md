@@ -202,6 +202,47 @@ nc -zv -w3 10.10.1.50 80 (depuis APPS)   -> timeout (MGMT hors périmètre APPS)
 
 **Deux fausses alertes rencontrées pendant l'audit, documentées pour la méthode** : un premier test MGMT a semblé échouer (timeout vers Nextcloud) — cause réelle : Server-DB et Server-IAM étaient simplement éteints, pas une erreur de règle. Un test Internet depuis APPS a aussi semblé échouer sur un nom de domaine précis (`neverssl.com`, code 28) alors qu'une IP publique directe (`1.1.1.1`) répondait sans problème — un deuxième essai a confirmé que c'était transitoire (DNS), pas une régression. **Leçon** : vérifier l'état des VMs et reproduire un test ambigu avant de conclure à une faille.
 
+### T15 — Défense en profondeur Apache (`Require ip`) : vérifiée en recréant la faille du T10
+
+L'amélioration notée en T10 — restreindre Apache sur Server-Nextcloud aux seules requêtes venant de Traefik — a été appliquée :
+
+```apache
+# /etc/apache2/sites-available/nextcloud.conf
+<Directory /var/www/nextcloud>
+    Require ip 10.10.2.10
+    AllowOverride All
+    Options FollowSymLinks MultiViews
+</Directory>
+```
+
+En fonctionnement normal, cette règle est redondante avec le pare-feu : seul `10.10.2.10` (Server-IAM) peut déjà atteindre Apache sur le port 80, puisque c'est le seul hôte du segment IAM/DMZ. Son vrai rôle est de **rattraper exactement le type d'erreur trouvé au T10** : une règle pare-feu mal configurée qui laisserait passer un autre segment.
+
+**Pour le vérifier, la faille du T10 a été recréée volontairement et brièvement** : une règle temporaire sur OPT4 (`ATTACKER network -> 10.10.3.30:80`, supprimée immédiatement après le test) a réouvert exactement le chemin réseau exploité en Phase A/T10.
+
+```console
+# Depuis Kali, avec le trou pare-feu temporairement rouvert :
+$ curl -4 -m8 -s -o /dev/null -w "%{http_code}\n" -H "Host: nextcloud.zerotrust.lab" http://10.10.3.30/status.php
+404
+```
+
+Le journal Apache confirme que le refus vient bien de la restriction applicative, pas d'une coïncidence réseau :
+
+```console
+$ sudo tail /var/log/apache2/error.log
+[authz_core:error] [client 10.10.5.50:40256] AH01630: client denied by server configuration: /var/www/nextcloud/status.php
+```
+
+`AH01630: client denied by server configuration` est le message exact qu'Apache génère pour un refus `Require ip`. Le `404` (plutôt qu'un `403` explicite) vient d'une page d'erreur personnalisée qui masque même l'existence de la ressource — une fuite d'information en moins que la réponse standard.
+
+**Après suppression de la règle temporaire**, retour immédiat au comportement normal :
+
+```console
+$ curl -4 -m8 -s -o /dev/null -w "%{http_code}\n" -H "Host: nextcloud.zerotrust.lab" http://10.10.3.30/status.php
+000
+```
+
+**Interprétation** : contrairement au T10, où la même requête renvoyait du contenu applicatif (`200`, version Nextcloud en clair), une règle pare-feu identique mal configurée serait maintenant rattrapée par Apache lui-même. La défense en profondeur ne repose plus sur une hypothèse : elle a été testée dans les conditions exactes de la faille originale.
+
 ## 6. Bilan avant / après
 
 | Attaque | Phase A (réseau plat) | Phase B (Zero Trust) |
@@ -213,3 +254,4 @@ nc -zv -w3 10.10.1.50 80 (depuis APPS)   -> timeout (MGMT hors périmètre APPS)
 | Mouvement latéral | Succès | Timeout vers MGMT, APPS, MONITORING (T11) |
 | Interception HTTP | Succès | Seul chemin : Traefik/TLS, accès par IP rejeté (T12) |
 | Bastion MGMT non restreint | *(non testé en Phase A)* | Faille trouvée et corrigée à l'audit (T14) : périmètre d'administration restreint à 4 hôtes |
+| Régression hypothétique du T10 | *(non applicable)* | Rattrapée indépendamment par Apache même si le pare-feu était mal configuré à nouveau (T15) |
