@@ -64,6 +64,7 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 - **Segmentation en 6 zones** avec politique de moindre privilège sur **toutes** les interfaces OPNsense, vérifiée par des tests **positifs et négatifs**.
 - **Supervision unidirectionnelle** : les agents Wazuh se connectent vers le manager ; le segment MONITORING n'a aucune règle sortante.
 - **Durcissement documenté** : port 8080 retiré, pas de socket Docker pour Traefik, URI de redirection exactes, secrets régénérés, compte admin permanent.
+- **Défense en profondeur vérifiée** : la faille d'ATTACKER (point 2 ci-dessous) a été volontairement recréée après correction pour confirmer qu'Apache seul la bloque désormais, indépendamment du pare-feu ([T15](zero-trust-lab/docs/tests.md)).
 - **Honnêteté sur les limites** : voir [limites connues](zero-trust-lab/docs/limits.md).
 
 ### Trois tests qui ont trouvé de vraies failles
@@ -80,7 +81,7 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 4. **Step 10** ✅ — Wazuh 4.14.9, 4 agents, flux unidirectionnel ([docs/wazuh.md](zero-trust-lab/docs/wazuh.md)).
 5. **Step 11** ✅ — Durcissement (TOTP, ports, secrets, admin permanent).
 6. **Step 12** ✅ — Rejeu complet de la chaîne d'attaque depuis Kali, faille trouvée et corrigée ([tests T10-T13](zero-trust-lab/docs/tests.md)).
-7. **Step 13** ✅ — Validation finale : audit complet des règles pare-feu sur toutes les interfaces, moindre privilège appliqué partout ([T14](zero-trust-lab/docs/tests.md)).
+7. **Step 13** ✅ — Validation finale : audit complet des règles pare-feu sur toutes les interfaces, moindre privilège appliqué partout ([T14](zero-trust-lab/docs/tests.md)), défense en profondeur Apache ajoutée et vérifiée en recréant la faille T10 ([T15](zero-trust-lab/docs/tests.md)).
 
 ## Résultats : avant / après
 
@@ -93,7 +94,7 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 | Mouvement latéral | ❌ Pas de segmentation | ✅ MGMT, APPS, MONITORING : timeout |
 | Interception de trafic | ❌ Pas de TLS | ✅ Seul chemin : Traefik/TLS ; accès par IP : `404` |
 
-Au-delà du rejeu de la Phase A, un audit complet des règles pare-feu a trouvé et corrigé trois failles distinctes sur trois interfaces différentes — chacune testée, corrigée, puis vérifiée par un test de non-régression avant de passer à la suivante. Détail complet, sorties brutes et corrections : [tests](zero-trust-lab/docs/tests.md).
+Au-delà du rejeu de la Phase A, un audit complet des règles pare-feu a trouvé et corrigé trois failles distinctes sur trois interfaces différentes — chacune testée, corrigée, puis vérifiée par un test de non-régression avant de passer à la suivante. Une défense en profondeur a ensuite été ajoutée côté application et vérifiée en recréant volontairement la condition de faille d'origine. Détail complet, sorties brutes et corrections : [tests](zero-trust-lab/docs/tests.md).
 
 ## Documentation
 
