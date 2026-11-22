@@ -1,6 +1,6 @@
 # Zero Trust Lab
 
-![Statut](https://img.shields.io/badge/statut-Phase%20B%20%E2%80%94%20Step%2012%20termin%C3%A9-green)
+![Statut](https://img.shields.io/badge/statut-Phase%20B%20%E2%80%94%20validation%20finale-green)
 ![Plateforme](https://img.shields.io/badge/VirtualBox-OPNsense-blue)
 ![IAM](https://img.shields.io/badge/IAM-Keycloak%20%2B%20Authelia%20MFA-success)
 ![SIEM](https://img.shields.io/badge/SIEM-Wazuh%204.14.9-informational)
@@ -33,7 +33,7 @@ flowchart LR
   end
   FW{{OPNsense<br/>moindre privilège}}
 
-  C -->|HTTPS| FW --> T
+  C -->|HTTPS/SSH restreints| FW --> T
   K -.->|seul Traefik 80/443| FW
   T -->|forward-auth| A
   T --> N
@@ -61,15 +61,16 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 ## Points forts techniques
 
 - **Double authentification en chaîne** : Authelia (mot de passe + TOTP, politique `deny` par défaut) devant Traefik, puis SSO Keycloak (OIDC) vers Nextcloud.
-- **Segmentation en 6 zones** avec politique de moindre privilège sur OPNsense, vérifiée par des tests **positifs et négatifs**.
+- **Segmentation en 6 zones** avec politique de moindre privilège sur **toutes** les interfaces OPNsense, vérifiée par des tests **positifs et négatifs**.
 - **Supervision unidirectionnelle** : les agents Wazuh se connectent vers le manager ; le segment MONITORING n'a aucune règle sortante.
 - **Durcissement documenté** : port 8080 retiré, pas de socket Docker pour Traefik, URI de redirection exactes, secrets régénérés, compte admin permanent.
 - **Honnêteté sur les limites** : voir [limites connues](zero-trust-lab/docs/limits.md).
 
-### Deux tests qui ont trouvé de vraies failles
+### Trois tests qui ont trouvé de vraies failles
 
 1. **Règle `any→any` oubliée (MONITORING)** : le test d'isolation a révélé une règle non documentée et non journalisée qui laissait MONITORING joindre IAM et APPS en SSH. Désactivée, testée, supprimée ([T4](zero-trust-lab/docs/tests.md)).
-2. **Contournement d'Authelia depuis ATTACKER** : le rejeu de la Phase A a montré que Kali atteignait Nextcloud directement (version exposée, page de connexion servie sans MFA), à cause de deux règles « Internet » dont la destination `*` couvrait les réseaux internes. Corrigé par un alias `RFC1918` inversé et une règle explicite vers Traefik ; re-test après correction : scan `filtered` partout hors Traefik, et la force brute SSH échoue dès la connexion ([T10-T13](zero-trust-lab/docs/tests.md)).
+2. **Contournement d'Authelia depuis ATTACKER** : le rejeu de la Phase A a montré que Kali atteignait Nextcloud directement, à cause de deux règles « Internet » trop larges sur OPT4. Corrigé par un alias `RFC1918` inversé ; re-test : tout `filtered` hors Traefik, Hydra bloqué dès la connexion ([T10-T13](zero-trust-lab/docs/tests.md)).
+3. **Un bastion d'administration qui n'en était pas un (MGMT)** : l'audit complet des règles, mené sur **toutes** les interfaces après la découverte précédente, a révélé que le segment MGMT — présenté comme le point de confiance le plus élevé du lab — pouvait en réalité ouvrir une session SSH directe vers n'importe quel serveur, contournant entièrement Authelia. Restreint à un périmètre explicite de 4 hôtes administrés ([T14](zero-trust-lab/docs/tests.md)).
 
 ## Démarche
 
@@ -79,7 +80,7 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 4. **Step 10** ✅ — Wazuh 4.14.9, 4 agents, flux unidirectionnel ([docs/wazuh.md](zero-trust-lab/docs/wazuh.md)).
 5. **Step 11** ✅ — Durcissement (TOTP, ports, secrets, admin permanent).
 6. **Step 12** ✅ — Rejeu complet de la chaîne d'attaque depuis Kali, faille trouvée et corrigée ([tests T10-T13](zero-trust-lab/docs/tests.md)).
-7. **Validation finale** *(à venir)* — Audit complet des règles OPNsense, checklist de reproductibilité.
+7. **Step 13** ✅ — Validation finale : audit complet des règles pare-feu sur toutes les interfaces, moindre privilège appliqué partout ([T14](zero-trust-lab/docs/tests.md)).
 
 ## Résultats : avant / après
 
@@ -92,7 +93,7 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 | Mouvement latéral | ❌ Pas de segmentation | ✅ MGMT, APPS, MONITORING : timeout |
 | Interception de trafic | ❌ Pas de TLS | ✅ Seul chemin : Traefik/TLS ; accès par IP : `404` |
 
-Le rejeu a trouvé une faille réelle (deux règles pare-feu trop larges laissaient Kali atteindre Nextcloud sans authentification) avant correction. Détail complet, sorties brutes et correction : [tests](zero-trust-lab/docs/tests.md).
+Au-delà du rejeu de la Phase A, un audit complet des règles pare-feu a trouvé et corrigé trois failles distinctes sur trois interfaces différentes — chacune testée, corrigée, puis vérifiée par un test de non-régression avant de passer à la suivante. Détail complet, sorties brutes et corrections : [tests](zero-trust-lab/docs/tests.md).
 
 ## Documentation
 
