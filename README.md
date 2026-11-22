@@ -7,7 +7,6 @@
 
 > **Idée centrale** : ne pas se contenter de déployer des briques Zero Trust, mais **prouver** leur efficacité. Une chaîne d'attaque réelle (scan → force brute → exfiltration) réussit contre un réseau plat (Phase A), puis est rejouée contre la même infrastructure reconstruite en Zero Trust (Phase B).
 
-Projet réalisé dans le cadre du module Cloud Computing et Sécurité, FST Marrakech, filière SIT.
 
 ## Architecture (Phase B)
 
