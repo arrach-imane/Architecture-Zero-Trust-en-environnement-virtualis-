@@ -1,6 +1,6 @@
 # Zero Trust Lab
 
-![Statut](https://img.shields.io/badge/statut-Phase%20B%20%E2%80%94%20Step%2012-orange)
+![Statut](https://img.shields.io/badge/statut-Phase%20B%20%E2%80%94%20validation-green)
 ![Plateforme](https://img.shields.io/badge/VirtualBox-OPNsense-blue)
 ![IAM](https://img.shields.io/badge/IAM-Keycloak%20%2B%20Authelia%20MFA-success)
 ![SIEM](https://img.shields.io/badge/SIEM-Wazuh%204.14.9-informational)
@@ -35,7 +35,7 @@ flowchart LR
   FW{{OPNsense<br/>moindre privilège}}
 
   C -->|HTTPS| FW --> T
-  K -.->|bloqué| FW
+  K -.->|seul Traefik 80/443| FW
   T -->|forward-auth| A
   T --> N
   N -->|OIDC| KC
@@ -67,9 +67,10 @@ Détails : [architecture](zero-trust-lab/docs/architecture.md).
 - **Durcissement documenté** : port 8080 retiré, pas de socket Docker pour Traefik, URI de redirection exactes, secrets régénérés, compte admin permanent.
 - **Honnêteté sur les limites** : voir [limites connues](zero-trust-lab/docs/limits.md).
 
-### Un test négatif qui a trouvé une vraie faille
+### Deux tests qui ont trouvé de vraies failles
 
-Le test d'isolation depuis MONITORING a révélé une règle `any→any` oubliée et non journalisée sur OPT5, qui laissait MONITORING joindre IAM et APPS en SSH. Elle a été désactivée, testée, puis supprimée ([voir T4](zero-trust-lab/docs/tests.md)).
+1. **Règle `any→any` oubliée (MONITORING)** : le test d'isolation a révélé une règle non documentée et non journalisée qui laissait MONITORING joindre IAM et APPS en SSH. Désactivée, testée, supprimée ([T4](zero-trust-lab/docs/tests.md)).
+2. **Contournement d'Authelia depuis ATTACKER** : le rejeu de la Phase A a montré que Kali atteignait Nextcloud directement (version exposée, page de connexion servie sans MFA), à cause de deux règles « Internet » dont la destination `*` couvrait les réseaux internes. Corrigé par un alias `RFC1918` inversé et une règle explicite vers Traefik ; re-test : tout `filtered` hors Traefik ([T10](zero-trust-lab/docs/tests.md)).
 
 ## Démarche
 
@@ -78,21 +79,21 @@ Le test d'isolation depuis MONITORING a révélé une règle `any→any` oublié
 3. **Step 7-9** ✅ — IAM : Keycloak, Traefik, Authelia MFA, SSO OIDC vers Nextcloud.
 4. **Step 10** ✅ — Wazuh 4.14.9, 4 agents, flux unidirectionnel ([docs/wazuh.md](zero-trust-lab/docs/wazuh.md)).
 5. **Step 11** ✅ — Durcissement (TOTP, ports, secrets, admin permanent).
-6. **Step 12** *(en cours)* — Rejeu de la chaîne d'attaque depuis Kali contre la Phase B.
-7. **Validation finale** *(à venir)* — Audit des règles, checklist de reproductibilité.
+6. **Step 12** ✅ — Rejeu de la chaîne d'attaque depuis Kali ([tests T10-T12](zero-trust-lab/docs/tests.md)).
+7. **Validation finale** *(à venir)* — Audit des règles OPNsense, checklist de reproductibilité.
 
 ## Résultats : avant / après
 
 | Attaque | Phase A (plat) | Phase B (Zero Trust) |
 |---|---|---|
-| Scan réseau | ❌ Réussi — tous services visibles | *Step 12* |
-| Force brute SSH | ❌ Réussi en 2 min (mot de passe faible) | *Step 12* |
-| Extraction de configuration | ❌ Réussi — identifiants en clair | *Step 12* |
-| Accès direct base de données | ❌ Réussi — DB non filtrée | *Step 12* |
-| Mouvement latéral | ❌ Réussi — pas de segmentation | *Step 12* |
-| Interception de trafic | ❌ Réussi — pas de TLS | *Step 12* |
+| Scan réseau | ❌ Tous services visibles | ✅ Seul Traefik 80/443 visible ; le reste `filtered` |
+| Force brute SSH | ❌ Mot de passe trouvé en 2 min | ✅ Port 22 inaccessible (timeout) |
+| Extraction de configuration | ❌ Identifiants en clair | ✅ Prérequis (accès SSH) bloqué |
+| Accès direct base de données | ❌ DB non filtrée | ✅ 3306 : timeout |
+| Mouvement latéral | ❌ Pas de segmentation | ✅ MGMT, APPS, MONITORING : timeout |
+| Interception de trafic | ❌ Pas de TLS | ✅ Seul chemin : Traefik/TLS ; accès par IP : `404` |
 
-Preuves déjà obtenues en Phase B : port 8080 inaccessible, accès par IP rejeté (HTTP 400), MONITORING sans flux sortant ([tests](zero-trust-lab/docs/tests.md)).
+L'attaque Hydra n'a pas été relancée en Phase B : le port SSH fermé la rend impossible. Détail, sorties et la faille corrigée en cours de rejeu : [tests](zero-trust-lab/docs/tests.md).
 
 ## Documentation
 
