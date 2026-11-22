@@ -68,7 +68,11 @@ Depuis Server-Monitoring, connexions sortantes vers IAM et APPS (SSH, TCP) : **t
 
 | Test | Attendu | Observé |
 |---|---|---|
-| T9 Agents Wazuh | 4 agents actifs | 001 server-iam, 002 server-nextcloud, 003 server-db, 004 kali-attacker |
+| T9 Agents Wazuh | 4 agents enregistrés | 001 server-iam, 002 server-nextcloud, 003 server-db, 004 kali-attacker |
+
+![T9 : dashboard Wazuh, 4 agents](screenshots/Screenshot%202026-11-21%20152911.png)
+
+*(server-iam et kali-attacker actifs au moment de la capture ; server-nextcloud et server-db déconnectés car leurs VM étaient éteintes — cela ne remet pas en cause l'enregistrement des 4 agents.)*
 
 ## 4. Rejeu de la Phase A depuis Kali (Step 12)
 
@@ -112,7 +116,7 @@ $ curl -4 -m8 -s -o /dev/null -w "%{http_code}\n" -H "Host: nextcloud.zerotrust.
 ```console
 $ curl -4 -m8 -s -o /dev/null -w "%{http_code}\n" -H "Host: nextcloud.zerotrust.lab" http://10.10.3.30/status.php
 000
-$ nmap -sV -Pn --top-ports 1000 --max-retries 1 -oN a1-scan-apres.txt 10.10.2.10 10.10.3.30 10.10.4.20
+$ nmap -sV -Pn --max-retries 1 -oN a1-scan-apres.txt 10.10.2.10 10.10.3.30 10.10.4.20
 10.10.2.10 : 80/tcp open, 443/tcp open
 10.10.3.30 : 1000 ports filtered
 10.10.4.20 : 1000 ports filtered
