@@ -8,8 +8,7 @@ sécurisation.
 
 ## Contexte
 
-Projet réalisé dans le cadre du module Cloud Computing et Sécurité,
-FST Marrakech, filière SIT.
+Projet réalisé dans le but de comprendre le principe zero Trust et de l'appliquer
 
 L'objectif n'est pas seulement de déployer des briques Zero Trust, mais de
 **prouver** leur efficacité : la Phase A construit volontairement une
